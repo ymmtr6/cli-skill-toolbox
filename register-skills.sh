@@ -48,6 +48,7 @@ Options:
   -t, --target TARGET  登録先を指定: claude, codex, all (デフォルト: all)
   -d, --dry-run        実際にファイルを作成せずに実行内容を表示
   -l, --list           登録可能なコマンドを一覧表示
+  -g, --generate CMD   コマンドの--help出力からテンプレートを自動生成
   -h, --help           このヘルプを表示
 
 Examples:
@@ -56,6 +57,7 @@ Examples:
   $(basename "$0") --target codex   # Codexのみ
   $(basename "$0") --dry-run        # ドライランで確認
   $(basename "$0") --list           # 登録可能なコマンドを一覧表示
+  $(basename "$0") --generate git   # gitのテンプレートを自動生成
 EOF
 }
 
@@ -80,6 +82,122 @@ strip_allowed_tools() {
     local input_file="$1"
     # YAMLフロントマター内のallowed-tools行とその配列項目を除去
     sed '/^allowed-tools:$/,/^[^ -]/{ /^allowed-tools:$/d; /^  - /d; }' "$input_file"
+}
+
+# テンプレートを自動生成
+generate_template() {
+    local cmd="$1"
+
+    # コマンドがインストールされているか確認
+    if ! command_exists "$cmd"; then
+        log_error "コマンドがインストールされていません: $cmd"
+        return 1
+    fi
+
+    # テンプレートが既に存在する場合は確認
+    local template_file="${TEMPLATES_DIR}/${cmd}.md"
+    if [[ -f "$template_file" ]]; then
+        log_warning "テンプレートが既に存在します: $template_file"
+        echo -n "上書きしますか？ [y/N] "
+        read -r response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            log_info "テンプレートの生成をキャンセルしました"
+            return 0
+        fi
+    fi
+
+    log_info "コマンドのヘルプを取得: $cmd --help"
+    local help_output
+    if ! help_output=$($cmd --help 2>&1); then
+        # --help が失敗した場合、試しに man ページを取得
+        log_warning "--help が利用できません。man ページを試します..."
+        if ! help_output=$(man "$cmd" 2>/dev/null); then
+            log_error "ヘルプ情報を取得できませんでした: $cmd"
+            return 1
+        fi
+    fi
+
+    # コマンドの説明を抽出（最初の数行）
+    local description="CLI tool for ${cmd}"
+    local first_lines=$(echo "$help_output" | head -20)
+    if echo "$first_lines" | grep -qi "usage\|description\|${cmd}"; then
+        # 簡単な説明を抽出（見出しや空行を除外）
+        description=$(echo "$first_lines" | grep -v "^$" | grep -v "^USAGE\|^USAGE:\|^DESCRIPTION\|^DESCRIPTION:\|^OPTIONS\|^OPTIONS:" | head -3 | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        # 説明が長すぎる場合は切り詰め
+        if [[ ${#description} -gt 100 ]]; then
+            description="${description:0:100}..."
+        fi
+    fi
+
+    # サブコマンドを抽出
+    local subcommands=""
+    if echo "$help_output" | grep -qi "subcommands\|commands\|available commands"; then
+        subcommands=$(echo "$help_output" | grep -A 20 "Subcommands\|Commands\|Available Commands" | grep -E "^\s{2,}[a-z]" | head -10 | awk '{print $1}' | tr '\n' ' ')
+    fi
+
+    # 主要オプションを抽出
+    local main_options=""
+    if echo "$help_output" | grep -E "^\s*-" > /dev/null; then
+        main_options=$(echo "$help_output" | grep -E "^\s*-\-?[a-z]" | head -10 | sed 's/^\s*//' | cut -d' ' -f1 | tr '\n' ' ')
+    fi
+
+    # テンプレートを生成
+    cat > "$template_file" << EOF
+---
+name: ${cmd}
+description: ${description}
+allowed-tools:
+  - Bash(${cmd}:*)
+---
+
+# ${cmd} スキル
+
+\`${cmd}\` コマンドのスキルテンプレートです。
+
+## 主な機能
+
+コマンドの主な機能をここに記載します。
+
+## 使用例
+
+\`\`\`bash
+# 基本的な使用例
+${cmd} <argument>
+
+# オプションを使用
+${cmd} --option <value>
+\`\`\`
+
+Bashツールを使用して${cmd}コマンドを実行してください。
+
+## 注意事項
+
+**重要**: このテンプレートは自動生成されています。以下の点を手動で調整してください：
+
+1. **主な機能**: コマンドの主な機能を具体的に記載してください
+2. **使用例**: 実用的な使用例を追加してください
+3. **注意事項**: 変更・削除を伴う操作がある場合は警告を追加してください
+   - ファイルの削除・上書き操作
+   - データの変更操作
+   - ネットワーク操作（POST, PUT, DELETE等）
+   - 認証情報の取り扱い
+
+自動生成時に検出された情報：
+- 説明: ${description}
+EOF
+
+    # サブコマンドが見つかった場合は追加
+    if [[ -n "$subcommands" ]]; then
+        echo "- サブコマンド: ${subcommands}" >> "$template_file"
+    fi
+
+    # 主要オプションが見つかった場合は追加
+    if [[ -n "$main_options" ]]; then
+        echo "- 主要オプション: ${main_options}" >> "$template_file"
+    fi
+
+    log_success "テンプレートを生成しました: $template_file"
+    log_info "テンプレートを編集してから使用してください"
 }
 
 # スキルを登録（target: claude または codex）
@@ -129,6 +247,7 @@ main() {
     local dry_run="false"
     local list_only="false"
     local target="all"
+    local generate_cmd=""
 
     # 引数をパース
     while [[ $# -gt 0 ]]; do
@@ -153,6 +272,10 @@ main() {
                 list_only="true"
                 shift
                 ;;
+            -g|--generate)
+                generate_cmd="$2"
+                shift 2
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -175,6 +298,14 @@ main() {
     if [[ "$target" == "codex" || "$target" == "all" ]]; then
         log_info "Codex スキルディレクトリ: $CODEX_SKILLS_DIR"
     fi
+    echo
+
+    # テンプレート自動生成モード
+    if [[ -n "$generate_cmd" ]]; then
+        generate_template "$generate_cmd"
+        exit $?
+    fi
+
     echo
 
     # コマンドリストを取得
