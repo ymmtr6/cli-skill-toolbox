@@ -48,6 +48,7 @@ Options:
   -t, --target TARGET  登録先を指定: claude, codex, all (デフォルト: all)
   -d, --dry-run        実際にファイルを作成せずに実行内容を表示
   -l, --list           登録可能なコマンドを一覧表示
+  -i, --installed      登録済みスキルを一覧表示
   -h, --help           このヘルプを表示
 
 Examples:
@@ -56,6 +57,7 @@ Examples:
   $(basename "$0") --target codex   # Codexのみ
   $(basename "$0") --dry-run        # ドライランで確認
   $(basename "$0") --list           # 登録可能なコマンドを一覧表示
+  $(basename "$0") --installed      # 登録済みスキルを一覧表示
 EOF
 }
 
@@ -80,6 +82,91 @@ strip_allowed_tools() {
     local input_file="$1"
     # YAMLフロントマター内のallowed-tools行とその配列項目を除去
     sed '/^allowed-tools:$/,/^[^ -]/{ /^allowed-tools:$/d; /^  - /d; }' "$input_file"
+}
+
+# 登録済みスキルを一覧表示
+list_installed_skills() {
+    local target="$1"
+
+    log_info "登録済みスキル一覧 ($target):"
+    echo
+
+    local skills_dir
+    if [[ "$target" == "claude" ]]; then
+        skills_dir="$CLAUDE_SKILLS_DIR"
+    elif [[ "$target" == "codex" ]]; then
+        skills_dir="$CODEX_SKILLS_DIR"
+    else
+        # both - show separately
+        list_installed_skills "claude"
+        echo
+        list_installed_skills "codex"
+        return 0
+    fi
+
+    # ディレクトリが存在しない場合
+    if [[ ! -d "$skills_dir" ]]; then
+        log_warning "スキルディレクトリが見つかりません: $skills_dir"
+        return 0
+    fi
+
+    # スキルを一覧表示
+    local found=0
+    for skill_dir in "$skills_dir"/*; do
+        if [[ -d "$skill_dir" ]]; then
+            found=1
+            local skill_name=$(basename "$skill_dir")
+            local skill_file="${skill_dir}/SKILL.md"
+            local template_file="${TEMPLATES_DIR}/${skill_name}.md"
+
+            # 登録日時を取得
+            local install_date=""
+            if [[ -d "$skill_dir" ]]; then
+                # macOS と Linux で stat のオプションが異なる
+                if stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$skill_dir" >/dev/null 2>&1; then
+                    # macOS
+                    install_date=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$skill_dir")
+                elif stat -c "%y" "$skill_dir" >/dev/null 2>&1; then
+                    # Linux
+                    install_date=$(stat -c "%y" "$skill_dir" | cut -d'.' -f1)
+                fi
+            fi
+
+            # テンプレートとの同期状態
+            local sync_status=""
+            if [[ -f "$template_file" ]]; then
+                # ファイルの修正時刻を比較
+                if [[ -f "$skill_file" ]]; then
+                    local skill_mtime template_mtime
+                    if stat -f "%m" "$skill_file" >/dev/null 2>&1; then
+                        # macOS
+                        skill_mtime=$(stat -f "%m" "$skill_file")
+                        template_mtime=$(stat -f "%m" "$template_file")
+                    else
+                        # Linux
+                        skill_mtime=$(stat -c "%Y" "$skill_file")
+                        template_mtime=$(stat -c "%Y" "$template_file")
+                    fi
+
+                    if [[ "$template_mtime" -gt "$skill_mtime" ]]; then
+                        sync_status="${YELLOW}更新あり${NC}"
+                    else
+                        sync_status="${GREEN}同期済み${NC}"
+                    fi
+                else
+                    sync_status="${GREEN}同期済み${NC}"
+                fi
+            else
+                sync_status="${RED}テンプレートなし${NC}"
+            fi
+
+            printf "%-15s %-20s %-15b\n" "$skill_name" "${install_date:-unknown}" "$sync_status"
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        log_info "登録済みのスキルはありません"
+    fi
 }
 
 # スキルを登録（target: claude または codex）
@@ -128,6 +215,7 @@ register_skill() {
 main() {
     local dry_run="false"
     local list_only="false"
+    local installed_only="false"
     local target="all"
 
     # 引数をパース
@@ -153,6 +241,10 @@ main() {
                 list_only="true"
                 shift
                 ;;
+            -i|--installed)
+                installed_only="true"
+                shift
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -175,6 +267,18 @@ main() {
     if [[ "$target" == "codex" || "$target" == "all" ]]; then
         log_info "Codex スキルディレクトリ: $CODEX_SKILLS_DIR"
     fi
+    echo
+
+    # 登録済みスキル一覧表示モード
+    if [[ "$installed_only" == "true" ]]; then
+        echo
+        printf "%-15s %-20s %-15s\n" "コマンド" "登録日時" "テンプレート同期"
+        printf "%-15s %-20s %-15s\n" "--------" "--------" "--------------"
+        echo
+        list_installed_skills "$target"
+        exit 0
+    fi
+
     echo
 
     # コマンドリストを取得
