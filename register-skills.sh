@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# CLI Skill Toolbox - Claude Code スキル自動登録スクリプト
-# インストール済みのCLIコマンドを検出し、Claude Codeのスキルとして登録します
+# CLI Skill Toolbox - Claude Code / Codex スキル自動登録スクリプト
+# インストール済みのCLIコマンドを検出し、Claude Code・Codexのスキルとして登録します
 
 set -euo pipefail
 
@@ -16,7 +16,8 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/commands.conf"
 TEMPLATES_DIR="${SCRIPT_DIR}/templates"
-SKILLS_DIR="${HOME}/.claude/skills"
+CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
+CODEX_SKILLS_DIR="${HOME}/.codex/skills"
 
 # ログ関数
 log_info() {
@@ -40,18 +41,21 @@ show_help() {
     cat << EOF
 Usage: $(basename "$0") [OPTIONS]
 
-インストール済みのCLIコマンドを検出し、Claude Codeのスキルとして登録します。
+インストール済みのCLIコマンドを検出し、Claude Code・Codexのスキルとして登録します。
 
 Options:
   -c, --config FILE    設定ファイルを指定 (デフォルト: commands.conf)
+  -t, --target TARGET  登録先を指定: claude, codex, all (デフォルト: all)
   -d, --dry-run        実際にファイルを作成せずに実行内容を表示
   -l, --list           登録可能なコマンドを一覧表示
   -h, --help           このヘルプを表示
 
 Examples:
-  $(basename "$0")              # デフォルト設定でスキルを登録
-  $(basename "$0") --dry-run    # ドライランで確認
-  $(basename "$0") --list       # 登録可能なコマンドを一覧表示
+  $(basename "$0")                  # 両方にスキルを登録
+  $(basename "$0") --target claude  # Claude Codeのみ
+  $(basename "$0") --target codex   # Codexのみ
+  $(basename "$0") --dry-run        # ドライランで確認
+  $(basename "$0") --list           # 登録可能なコマンドを一覧表示
 EOF
 }
 
@@ -71,12 +75,28 @@ read_commands() {
     grep -v '^#' "$CONFIG_FILE" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
-# スキルを登録
+# テンプレートからallowed-toolsを除去してCodex用SKILL.mdを生成
+strip_allowed_tools() {
+    local input_file="$1"
+    # YAMLフロントマター内のallowed-tools行とその配列項目を除去
+    sed '/^allowed-tools:$/,/^[^ -]/{ /^allowed-tools:$/d; /^  - /d; }' "$input_file"
+}
+
+# スキルを登録（target: claude または codex）
 register_skill() {
     local cmd="$1"
     local dry_run="$2"
+    local target="$3"
     local template_file="${TEMPLATES_DIR}/${cmd}.md"
-    local skill_dir="${SKILLS_DIR}/${cmd}"
+
+    local skills_dir
+    if [[ "$target" == "codex" ]]; then
+        skills_dir="$CODEX_SKILLS_DIR"
+    else
+        skills_dir="$CLAUDE_SKILLS_DIR"
+    fi
+
+    local skill_dir="${skills_dir}/${cmd}"
     local skill_file="${skill_dir}/SKILL.md"
 
     # テンプレートが存在するか確認
@@ -86,29 +106,43 @@ register_skill() {
     fi
 
     if [[ "$dry_run" == "true" ]]; then
-        log_info "[DRY-RUN] スキルを登録: $cmd -> $skill_file"
+        log_info "[DRY-RUN] [$target] スキルを登録: $cmd -> $skill_file"
         return 0
     fi
 
     # スキルディレクトリを作成
     mkdir -p "$skill_dir"
 
-    # テンプレートをコピー（上書き）
-    cp "$template_file" "$skill_file"
+    if [[ "$target" == "codex" ]]; then
+        # Codex向け: allowed-toolsを除去してコピー
+        strip_allowed_tools "$template_file" > "$skill_file"
+    else
+        # Claude Code向け: そのままコピー
+        cp "$template_file" "$skill_file"
+    fi
 
-    log_success "スキルを登録しました: $cmd -> $skill_file"
+    log_success "[$target] スキルを登録しました: $cmd -> $skill_file"
 }
 
 # メイン処理
 main() {
     local dry_run="false"
     local list_only="false"
+    local target="all"
 
     # 引数をパース
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -c|--config)
                 CONFIG_FILE="$2"
+                shift 2
+                ;;
+            -t|--target)
+                target="$2"
+                if [[ "$target" != "claude" && "$target" != "codex" && "$target" != "all" ]]; then
+                    log_error "無効なターゲット: $target (claude, codex, all のいずれかを指定)"
+                    exit 1
+                fi
                 shift 2
                 ;;
             -d|--dry-run)
@@ -134,7 +168,13 @@ main() {
     log_info "CLI Skill Toolbox - スキル登録スクリプト"
     log_info "設定ファイル: $CONFIG_FILE"
     log_info "テンプレートディレクトリ: $TEMPLATES_DIR"
-    log_info "スキルディレクトリ: $SKILLS_DIR"
+    log_info "ターゲット: $target"
+    if [[ "$target" == "claude" || "$target" == "all" ]]; then
+        log_info "Claude Code スキルディレクトリ: $CLAUDE_SKILLS_DIR"
+    fi
+    if [[ "$target" == "codex" || "$target" == "all" ]]; then
+        log_info "Codex スキルディレクトリ: $CODEX_SKILLS_DIR"
+    fi
     echo
 
     # コマンドリストを取得
@@ -173,6 +213,15 @@ main() {
         exit 0
     fi
 
+    # 登録対象のターゲットリストを構築
+    local targets=()
+    if [[ "$target" == "claude" || "$target" == "all" ]]; then
+        targets+=("claude")
+    fi
+    if [[ "$target" == "codex" || "$target" == "all" ]]; then
+        targets+=("codex")
+    fi
+
     # スキルを登録
     for cmd in $commands; do
         if ! command_exists "$cmd"; then
@@ -181,11 +230,13 @@ main() {
             continue
         fi
 
-        if register_skill "$cmd" "$dry_run"; then
-            ((registered++))
-        else
-            ((skipped++))
-        fi
+        for t in "${targets[@]}"; do
+            if register_skill "$cmd" "$dry_run" "$t"; then
+                ((registered++))
+            else
+                ((skipped++))
+            fi
+        done
     done
 
     echo
