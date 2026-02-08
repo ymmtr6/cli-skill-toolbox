@@ -48,6 +48,8 @@ Options:
   -t, --target TARGET  登録先を指定: claude, codex, all (デフォルト: all)
   -d, --dry-run        実際にファイルを作成せずに実行内容を表示
   -l, --list           登録可能なコマンドを一覧表示
+  --category CAT       指定したカテゴリのみ処理
+  --list-categories    利用可能なカテゴリを一覧表示
   -h, --help           このヘルプを表示
 
 Examples:
@@ -56,6 +58,16 @@ Examples:
   $(basename "$0") --target codex   # Codexのみ
   $(basename "$0") --dry-run        # ドライランで確認
   $(basename "$0") --list           # 登録可能なコマンドを一覧表示
+  $(basename "$0") --category github  # 特定カテゴリのみ登録
+  $(basename "$0") --list --category search  # カテゴリでフィルタ
+
+commands.conf でのカテゴリ定義:
+  # [category: github]
+  gh
+
+  # [category: data-processing]
+  jq
+  yq
 EOF
 }
 
@@ -64,15 +76,68 @@ command_exists() {
     command -v "$1" &> /dev/null
 }
 
-# 設定ファイルからコマンドリストを読み取り
+# 設定ファイルからコマンドリストを読み取り（カテゴリ対応）
 read_commands() {
+    local filter_category="$1"
+    local show_categories="$2"
+
     if [[ ! -f "$CONFIG_FILE" ]]; then
         log_error "設定ファイルが見つかりません: $CONFIG_FILE"
         exit 1
     fi
 
-    # コメントと空行を除外してコマンドを読み取り
-    grep -v '^#' "$CONFIG_FILE" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    local current_category=""
+    local result=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # カテゴリ定義を検出
+        if [[ "$line" =~ ^#[[:space:]]*\[category:[[:space:]]*([^]]+)\] ]]; then
+            current_category="${BASH_REMATCH[1]}"
+            # カテゴリ一覧表示モードの場合
+            if [[ "$show_categories" == "true" ]]; then
+                echo "$current_category"
+            fi
+            continue
+        fi
+
+        # コメントと空行はスキップ
+        if [[ "$line" =~ ^# ]] || [[ "$line" =~ ^[[:space:]]*$ ]]; then
+            continue
+        fi
+
+        # コマンド名を抽出
+        local cmd=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        # フィルタ条件が指定されている場合
+        if [[ -n "$filter_category" ]]; then
+            if [[ "$current_category" == "$filter_category" ]]; then
+                echo "$cmd"
+            fi
+        elif [[ "$show_categories" != "true" ]]; then
+            # カテゴリ情報を付与して出力（CMD:CATEGORY形式）
+            echo "${cmd}:${current_category}"
+        fi
+    done < "$CONFIG_FILE"
+}
+
+# 利用可能なカテゴリを一覧表示
+list_categories() {
+    log_info "利用可能なカテゴリ:"
+    echo
+
+    local categories=($(read_commands "" "true"))
+    if [[ ${#categories[@]} -eq 0 ]]; then
+        log_info "カテゴリは定義されていません"
+        echo
+        log_info "commands.conf でカテゴリを定義するには:"
+        echo "  # [category: カテゴリ名]"
+        echo "  コマンド名"
+        return 0
+    fi
+
+    for cat in "${categories[@]}"; do
+        echo "  - $cat"
+    done
 }
 
 # テンプレートからallowed-toolsを除去してCodex用SKILL.mdを生成
@@ -128,7 +193,9 @@ register_skill() {
 main() {
     local dry_run="false"
     local list_only="false"
+    local list_categories_only="false"
     local target="all"
+    local filter_category=""
 
     # 引数をパース
     while [[ $# -gt 0 ]]; do
@@ -153,6 +220,14 @@ main() {
                 list_only="true"
                 shift
                 ;;
+            --category)
+                filter_category="$2"
+                shift 2
+                ;;
+            --list-categories)
+                list_categories_only="true"
+                shift
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -175,11 +250,24 @@ main() {
     if [[ "$target" == "codex" || "$target" == "all" ]]; then
         log_info "Codex スキルディレクトリ: $CODEX_SKILLS_DIR"
     fi
+
+    # カテゴリフィルターの表示
+    if [[ -n "$filter_category" ]]; then
+        log_info "カテゴリフィルター: $filter_category"
+    fi
+    echo
+
+    # カテゴリ一覧表示モード
+    if [[ "$list_categories_only" == "true" ]]; then
+        list_categories
+        exit 0
+    fi
+
     echo
 
     # コマンドリストを取得
     local commands
-    commands=$(read_commands)
+    commands=$(read_commands "$filter_category" "")
 
     local registered=0
     local skipped=0
@@ -187,12 +275,21 @@ main() {
 
     # 一覧表示モード
     if [[ "$list_only" == "true" ]]; then
-        log_info "登録可能なコマンド一覧:"
+        if [[ -n "$filter_category" ]]; then
+            log_info "登録可能なコマンド一覧 (カテゴリ: $filter_category):"
+        else
+            log_info "登録可能なコマンド一覧:"
+        fi
         echo
-        printf "%-12s %-12s %-12s\n" "コマンド" "インストール" "テンプレート"
-        printf "%-12s %-12s %-12s\n" "--------" "----------" "----------"
+        printf "%-12s %-12s %-12s %-15s\n" "コマンド" "インストール" "テンプレート" "カテゴリ"
+        printf "%-12s %-12s %-12s %-15s\n" "--------" "----------" "----------" "--------"
 
-        for cmd in $commands; do
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+
+            local cmd="${line%:*}"
+            local category="${line##*:}"
+
             local installed="No"
             local has_template="No"
 
@@ -208,8 +305,8 @@ main() {
                 has_template="${RED}No${NC}"
             fi
 
-            printf "%-12s %-23b %-23b\n" "$cmd" "$installed" "$has_template"
-        done
+            printf "%-12s %-23b %-23b %-15s\n" "$cmd" "$installed" "$has_template" "$category"
+        done <<< "$commands"
         exit 0
     fi
 
@@ -223,7 +320,12 @@ main() {
     fi
 
     # スキルを登録
-    for cmd in $commands; do
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        local cmd="${line%:*}"
+        local category="${line##*:}"
+
         if ! command_exists "$cmd"; then
             log_warning "コマンドがインストールされていません: $cmd"
             ((not_found++))
@@ -237,7 +339,7 @@ main() {
                 ((skipped++))
             fi
         done
-    done
+    done <<< "$commands"
 
     echo
     log_info "=== 結果サマリー ==="
