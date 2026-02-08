@@ -1,9 +1,12 @@
 # cli-skill-toolbox
 
-インストール済みの便利CLIコマンド(gh/jq/yqなど)を検出して、Claude CodeのSkillsとして自動登録するためのBashスクリプトです。
+インストール済みの便利CLIコマンド(gh/jq/yqなど)を検出して、**Claude Code** および **OpenAI Codex CLI** のSkillsとして自動登録するためのBashスクリプトです。
 
-Claude Codeのスキルは `~/.claude/skills/<skill-name>/SKILL.md` に配置し、SKILL.md は YAML フロントマター (nameとdescription必須) + 指示本文 で構成します。
-また、`allowed-tools` を指定すると、スキル有効時に Claude が許可なしで使えるツールを絞れます。
+### Claude Code
+スキルは `~/.claude/skills/<skill-name>/SKILL.md` に配置されます。SKILL.md は YAML フロントマター (`name`, `description`, `allowed-tools`) + 指示本文で構成します。
+
+### Codex CLI
+スキルは `~/.codex/skills/<skill-name>/SKILL.md` に配置されます。SKILL.md は YAML フロントマター (`name`, `description`) + 指示本文で構成します。Codexでは `allowed-tools` は使用しないため、登録時に自動除去されます。
 
 ## インストール
 
@@ -18,8 +21,14 @@ chmod +x register-skills.sh
 ### 基本的な使い方
 
 ```bash
-# スキルを登録
+# Claude Code と Codex の両方にスキルを登録
 ./register-skills.sh
+
+# Claude Code のみに登録
+./register-skills.sh --target claude
+
+# Codex のみに登録
+./register-skills.sh --target codex
 
 # ドライラン（実際にファイルを作成せずに確認）
 ./register-skills.sh --dry-run
@@ -41,9 +50,9 @@ chmod +x register-skills.sh
 
 ```
 cli-skill-toolbox/
-├── register-skills.sh    # メインスクリプト
+├── register-skills.sh    # メインスクリプト（Claude Code / Codex 両対応）
 ├── commands.conf          # 対象コマンド設定ファイル
-├── templates/             # コマンド別テンプレート
+├── templates/             # コマンド別テンプレート（共通）
 │   ├── gh.md
 │   ├── jq.md
 │   ├── yq.md
@@ -54,6 +63,8 @@ cli-skill-toolbox/
 │   └── eza.md
 └── README.md
 ```
+
+テンプレートは Claude Code と Codex で共通です。Codex 向けの登録時には `allowed-tools` が自動的に除去されます。
 
 ## 設定ファイル (commands.conf)
 
@@ -75,7 +86,7 @@ yq
 1. `commands.conf` にコマンド名を追加
 2. `templates/<command>.md` にテンプレートファイルを作成
 
-テンプレートファイルの形式:
+テンプレートファイルの形式（Claude Code / Codex 共通）:
 
 ```markdown
 ---
@@ -90,7 +101,7 @@ allowed-tools:
 スキルの詳細な説明...
 ```
 
-> **Note:** `allowed-tools` は `Bash(コマンド名:*)` の形式で、そのコマンドのみに制限することを推奨します。
+> **Note:** `allowed-tools` は Claude Code 用のフィールドです。`Bash(コマンド名:*)` の形式で、そのコマンドのみに制限することを推奨します。Codex 向け登録時には自動的に除去されます。
 
 ## 対応コマンド
 
