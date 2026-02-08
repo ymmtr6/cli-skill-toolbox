@@ -48,6 +48,7 @@ Options:
   -t, --target TARGET  登録先を指定: claude, codex, all (デフォルト: all)
   -d, --dry-run        実際にファイルを作成せずに実行内容を表示
   -l, --list           登録可能なコマンドを一覧表示
+  -v, --validate       テンプレートファイルの検証を行う
   -h, --help           このヘルプを表示
 
 Examples:
@@ -56,6 +57,7 @@ Examples:
   $(basename "$0") --target codex   # Codexのみ
   $(basename "$0") --dry-run        # ドライランで確認
   $(basename "$0") --list           # 登録可能なコマンドを一覧表示
+  $(basename "$0") --validate       # テンプレートを検証
 EOF
 }
 
@@ -80,6 +82,103 @@ strip_allowed_tools() {
     local input_file="$1"
     # YAMLフロントマター内のallowed-tools行とその配列項目を除去
     sed '/^allowed-tools:$/,/^[^ -]/{ /^allowed-tools:$/d; /^  - /d; }' "$input_file"
+}
+
+# テンプレートを検証
+validate_templates() {
+    log_info "テンプレートファイルを検証します"
+    echo
+
+    local ok_count=0
+    local warn_count=0
+    local error_count=0
+
+    # テンプレートディレクトリが存在するか確認
+    if [[ ! -d "$TEMPLATES_DIR" ]]; then
+        log_error "テンプレートディレクトリが見つかりません: $TEMPLATES_DIR"
+        return 1
+    fi
+
+    # すべての .md ファイルを検証
+    for template_file in "${TEMPLATES_DIR}"/*.md; do
+        if [[ ! -f "$template_file" ]]; then
+            continue
+        fi
+
+        local cmd_name=$(basename "$template_file" .md)
+        local has_error=0
+        local has_warning=0
+        local messages=()
+
+        # YAMLフロントマターの開始を確認
+        if ! grep -q '^---' "$template_file"; then
+            messages+=("YAMLフロントマターが見つかりません")
+            has_error=1
+        else
+            # YAMLフロントマターを抽出
+            local frontmatter=$(sed '/^---$/d; /^---$/q' "$template_file")
+
+            # 必須フィールドの確認
+            if ! echo "$frontmatter" | grep -q '^name:'; then
+                messages+=("必須フィールド 'name' がありません")
+                has_error=1
+            fi
+
+            if ! echo "$frontmatter" | grep -q '^description:'; then
+                messages+=("必須フィールド 'description' がありません")
+                has_error=1
+            fi
+
+            # allowed-tools の確認
+            local allowed_tools=$(echo "$frontmatter" | grep '^allowed-tools:' -A 10 | sed '/^allowed-tools:/d')
+            if [[ -z "$allowed_tools" ]]; then
+                messages+=("allowed-tools が指定されていません")
+                has_warning=1
+            else
+                # Bash のみの場合は警告
+                if echo "$allowed_tools" | grep -q 'Bash$'; then
+                    if ! echo "$allowed_tools" | grep -q 'Bash('; then
+                        messages+=("allowed-tools が 'Bash' のみ（コマンド制限を推奨）")
+                        has_warning=1
+                    fi
+                fi
+            fi
+
+            # name フィールドの値を取得
+            local name_value=$(echo "$frontmatter" | grep '^name:' | sed 's/^name: *//;s/"//g')
+            local tools_value=$(echo "$frontmatter" | grep -E '^\s+-.*Bash\(' | sed 's/.*Bash(\([^)]*\).*/\1/' | head -1)
+
+            # 結果を表示
+            if [[ $has_error -eq 1 ]]; then
+                echo -e "${RED}[ERROR]${NC} $cmd_name"
+                for msg in "${messages[@]}"; do
+                    echo "  - $msg"
+                done
+                ((error_count++))
+            elif [[ $has_warning -eq 1 ]]; then
+                echo -e "${YELLOW}[WARN]${NC} $cmd_name"
+                for msg in "${messages[@]}"; do
+                    echo "  - $msg"
+                done
+                ((warn_count++))
+            else
+                local tools_info="allowed-tools: ${tools_value:-none}"
+                echo -e "${GREEN}[OK]${NC} $cmd_name - name: ${name_value}, ${tools_info}"
+                ((ok_count++))
+            fi
+        fi
+    done
+
+    echo
+    log_info "=== 検証結果 ==="
+    log_info "OK: $ok_count"
+    log_info "警告: $warn_count"
+    log_error "エラー: $error_count"
+
+    if [[ $error_count -gt 0 ]]; then
+        return 1
+    fi
+    return 0
 }
 
 # スキルを登録（target: claude または codex）
@@ -128,6 +227,7 @@ register_skill() {
 main() {
     local dry_run="false"
     local list_only="false"
+    local validate_only="false"
     local target="all"
 
     # 引数をパース
@@ -153,6 +253,10 @@ main() {
                 list_only="true"
                 shift
                 ;;
+            -v|--validate)
+                validate_only="true"
+                shift
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -175,6 +279,14 @@ main() {
     if [[ "$target" == "codex" || "$target" == "all" ]]; then
         log_info "Codex スキルディレクトリ: $CODEX_SKILLS_DIR"
     fi
+    echo
+
+    # 検証モード
+    if [[ "$validate_only" == "true" ]]; then
+        validate_templates
+        exit $?
+    fi
+
     echo
 
     # コマンドリストを取得
